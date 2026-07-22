@@ -146,14 +146,21 @@ DAILY_TOPIC_POOL = [
 ]
 
 # 경로
-SCRIPT_DIR = Path(__file__).parent
+# PyInstaller 로 .app 번들로 실행되면(frozen) 번들 안은 쓰기 불가/재설치 시 사라지므로
+# 로그·설정을 ~/Library/Application Support/VoiceTranslator 아래에 둔다.
+CONFIG_DIR = Path.home() / "Library" / "Application Support" / "VoiceTranslator"
+CONFIG_FILE = CONFIG_DIR / "config"
+
+if getattr(sys, "frozen", False):
+    SCRIPT_DIR = CONFIG_DIR
+else:
+    SCRIPT_DIR = Path(__file__).parent
+
 LOCAL_ENV = SCRIPT_DIR / ".env"
 LOGS_DIR = SCRIPT_DIR / "logs"
 VOCAB_FILE = LOGS_DIR / "vocab.md"
 CONVERSATION_FILE = LOGS_DIR / "conversation.md"
 DAILY_CONV_DIR = LOGS_DIR / "daily_conversations"
-CONFIG_DIR = Path.home() / "Library" / "Application Support" / "VoiceTranslator"
-CONFIG_FILE = CONFIG_DIR / "config"
 
 READY_MSG = "🎤 버튼 클릭으로 녹음 / 또는 아래 입력창에 한국어 입력 후 Enter"
 RECORDING_MSG = "🔴 녹음 중… (다시 누르면 종료)"
