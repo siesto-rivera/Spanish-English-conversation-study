@@ -1,8 +1,7 @@
 """
-Voice Translator — 한국어 음성/텍스트 → 영어/스페인어
+Text Translator — 한국어 텍스트 → 영어/스페인어
 사용법:
-  - 🎤 녹음 버튼 클릭 (또는 창 포커스 상태에서 F9)
-  - 또는 하단 입력창에 한국어 입력 후 Enter
+  - 하단 입력창에 한국어 입력 후 🇺🇸 영어 번역 / 🇪🇸 스페인어 번역 버튼 클릭
 결과는 logs/YYYY-MM-DD.md 에 자동 저장됨.
 """
 
@@ -16,15 +15,10 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import scrolledtext, font, messagebox
 
-import numpy as np
-import sounddevice as sd
-from faster_whisper import WhisperModel
 from anthropic import Anthropic
 
 
 # ────────── 설정 ──────────
-SAMPLE_RATE = 16000
-WHISPER_MODEL_SIZE = "medium"
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = """너는 한국어 사용자를 위한 영어/스페인어 학습 도우미다.
@@ -46,6 +40,26 @@ SYSTEM_PROMPT = """너는 한국어 사용자를 위한 영어/스페인어 학�
 - 단어 하나 → 동의어 2-3개 + 짧은 예문 1개씩
 - 문장 → 직역과 자연스러운 의역 둘 다
 - 설명은 한국어로 간결하게
+"""
+
+SYSTEM_PROMPT_EN = """너는 한국어 사용자를 위한 영어 학습 도우미다.
+사용자가 보낸 한국어 단어 또는 문장을 영어로 번역한다.
+아래 두 줄 형식을 정확히 지켜 출력하고, 다른 말이나 제목·라벨은 붙이지 마라:
+
+번역: <가장 자연스러운 영어 표현 하나>
+유의사항: <이 표현을 쓸 때 유의할 점을 한국어로 간결히. 헷갈리기 쉬운 유사 표현/단어가 있으면 그 차이를 함께>
+
+스페인어는 절대 출력하지 마라.
+"""
+
+SYSTEM_PROMPT_ES = """너는 한국어 사용자를 위한 스페인어 학습 도우미다.
+사용자가 보낸 한국어 단어 또는 문장을 España 표준 스페인어로 번역한다.
+아래 두 줄 형식을 정확히 지켜 출력하고, 다른 말이나 제목·라벨은 붙이지 마라:
+
+번역: <가장 자연스러운 스페인어 표현 하나>
+유의사항: <이 표현을 쓸 때 유의할 점을 한국어로 간결히. 헷갈리기 쉬운 유사 표현/단어가 있으면 그 차이를 함께>
+
+영어는 절대 출력하지 마라.
 """
 
 DAILY_CONVERSATION_PROMPT = """너는 스페인어/영어 학습용 대화 콘텐츠를 만드는 작가다.
@@ -162,8 +176,7 @@ VOCAB_FILE = LOGS_DIR / "vocab.md"
 CONVERSATION_FILE = LOGS_DIR / "conversation.md"
 DAILY_CONV_DIR = LOGS_DIR / "daily_conversations"
 
-READY_MSG = "🎤 버튼 클릭으로 녹음 / 또는 아래 입력창에 한국어 입력 후 Enter"
-RECORDING_MSG = "🔴 녹음 중… (다시 누르면 종료)"
+READY_MSG = "아래 입력창에 한국어를 입력하고 번역 버튼을 누르세요"
 # ──────────────────────────
 
 
@@ -205,18 +218,11 @@ def show_config_error():
 
 class VoiceTranslator:
     def __init__(self, api_key: str):
-        self.recording = False
-        self.audio_chunks = []
-        self.stream = None
         self.claude = Anthropic(api_key=api_key)
-
-        print(f"[init] Whisper '{WHISPER_MODEL_SIZE}' 로딩 중…")
-        self.whisper = WhisperModel(WHISPER_MODEL_SIZE, device="auto", compute_type="int8")
-        print("[init] Whisper 로딩 완료")
 
         # UI
         self.root = tk.Tk()
-        self.root.title("Voice Translator — KO → EN / ES")
+        self.root.title("Text Translator — KO → EN / ES")
         self.root.geometry("960x720")
         self.root.minsize(820, 520)
 
@@ -225,16 +231,6 @@ class VoiceTranslator:
             font=("Helvetica", 13), pady=8,
         )
         self.status.pack()
-
-        # 녹음 버튼 (큰 버튼)
-        self.record_btn = tk.Button(
-            self.root,
-            text="🎤  녹음 시작",
-            font=("Helvetica", 15, "bold"),
-            command=self.toggle,
-            height=2,
-        )
-        self.record_btn.pack(fill=tk.X, padx=10, pady=(0, 8))
 
         # 결과 출력 영역
         text_font = font.Font(family="Menlo", size=13)
@@ -265,18 +261,26 @@ class VoiceTranslator:
         # 키 입력은 막되, 선택/스크롤/단축키는 통과시켜 "선택 가능한 읽기 전용"으로 만든다
         self.text.bind("<Key>", self._block_keys)
 
-        # 텍스트 입력 영역
+        # 텍스트 입력 영역 (여러 줄, 기본 5줄)
         input_frame = tk.Frame(self.root)
         input_frame.pack(fill=tk.X, padx=10, pady=(0, 6))
 
-        self.entry = tk.Entry(input_frame, font=("Helvetica", 13))
-        self.entry.pack(side=tk.LEFT, expand=True, fill=tk.X, ipady=4)
-        self.entry.bind("<Return>", lambda e: self.submit_text())
+        self.entry = tk.Text(input_frame, font=("Helvetica", 13), height=5, wrap=tk.WORD)
+        self.entry.pack(fill=tk.X, ipady=2)
 
+        # 번역 버튼 두 개: 영어 / 스페인어
+        translate_btns = tk.Frame(input_frame)
+        translate_btns.pack(fill=tk.X, pady=(6, 0))
         tk.Button(
-            input_frame, text="번역 ↵",
-            command=self.submit_text,
-        ).pack(side=tk.LEFT, padx=(6, 0))
+            translate_btns, text="🇺🇸 영어 번역",
+            font=("Helvetica", 13, "bold"),
+            command=lambda: self.submit_text("en"),
+        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 3))
+        tk.Button(
+            translate_btns, text="🇪🇸 스페인어 번역",
+            font=("Helvetica", 13, "bold"),
+            command=lambda: self.submit_text("es"),
+        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(3, 0))
 
         # 하단 버튼
         btn_frame = tk.Frame(self.root)
@@ -308,9 +312,6 @@ class VoiceTranslator:
 
         # 시작 시 입력창에 포커스
         self.entry.focus_set()
-
-        # 창 포커스 상태에서 F9 단축키도 지원 (권한 불필요)
-        self.root.bind_all("<F9>", lambda e: self.toggle())
 
     # ── UI 헬퍼 ──
     def set_status(self, msg: str):
@@ -371,86 +372,55 @@ class VoiceTranslator:
         return "break"
 
     # ── 텍스트 입력 처리 ──
-    def submit_text(self):
-        text = self.entry.get().strip()
+    def submit_text(self, lang="both"):
+        text = self.entry.get("1.0", "end-1c").strip()
         if not text:
             return
-        self.entry.delete(0, tk.END)
-        threading.Thread(target=lambda: self._translate(text), daemon=True).start()
+        self.entry.delete("1.0", tk.END)
+        threading.Thread(target=lambda: self._translate(text, lang), daemon=True).start()
 
-    # ── 음성 녹음 ──
-    def toggle(self):
-        if not self.recording:
-            self.start_recording()
-        else:
-            self.stop_recording()
+    # ── 번역 로직 ──
+    # lang: "en"=영어만, "es"=스페인어만, 그 외=둘 다
+    def _translate(self, ko_text: str, lang: str = "both"):
+        system_prompt = {
+            "en": SYSTEM_PROMPT_EN,
+            "es": SYSTEM_PROMPT_ES,
+        }.get(lang, SYSTEM_PROMPT)
 
-    def start_recording(self):
-        self.recording = True
-        self.audio_chunks = []
-        self.set_status(RECORDING_MSG)
-        self.record_btn.config(text="⏹  녹음 종료 (클릭)")
-
-        def cb(indata, frames, time_info, status):
-            if self.recording:
-                self.audio_chunks.append(indata.copy())
-
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=cb
-        )
-        self.stream.start()
-
-    def stop_recording(self):
-        if not self.recording:
-            return
-        self.recording = False
-        try:
-            self.stream.stop()
-            self.stream.close()
-        except Exception:
-            pass
-        self.set_status("⏳ 음성 인식 중…")
-        self.record_btn.config(text="🎤  녹음 시작")
-        threading.Thread(target=self.process_voice, daemon=True).start()
-
-    def process_voice(self):
-        """녹음된 음성을 Whisper로 인식한 뒤 번역 호출"""
-        if not self.audio_chunks:
-            self.set_status(READY_MSG)
-            return
-
-        audio = np.concatenate(self.audio_chunks, axis=0).flatten().astype(np.float32)
-
-        segments, _info = self.whisper.transcribe(
-            audio, language="ko", beam_size=5, vad_filter=True
-        )
-        ko_text = " ".join(s.text for s in segments).strip()
-
-        if not ko_text:
-            self.set_status("⚠️  음성을 인식하지 못했습니다.")
-            return
-
-        self._translate(ko_text)
-
-    # ── 공통 번역 로직 (음성/텍스트 모두 사용) ──
-    def _translate(self, ko_text: str):
-        self.append(f"\n▶ 입력: {ko_text}\n\n")
+        self.append(f"\n▶ 입력: {ko_text}\n")
         self.set_status("🤖 Claude 호출 중…")
 
         try:
             msg = self.claude.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=1024,
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[{"role": "user", "content": ko_text}],
             )
             response = "".join(b.text for b in msg.content if b.type == "text")
-            self.append(f"{response}\n{'─' * 70}\n")
-            self.save_to_log(ko_text, response)
+            translation, notes = self._parse_response(response)
+            # 번역문 → 3줄 아래 구분선 → 표현 시 유의사항
+            block = f"{translation}\n\n\n----------------------------\n{notes}\n"
+            self.append(block)
+            self.save_to_log(ko_text, block)
         except Exception as e:
             self.append(f"[오류] {e}\n")
 
         self.set_status(READY_MSG)
+
+    @staticmethod
+    def _parse_response(response: str):
+        """Claude 응답에서 '번역:'/'유의사항:' 을 뽑는다. 형식이 어긋나면 통째로 번역으로 처리."""
+        translation, notes = "", ""
+        for line in response.splitlines():
+            s = line.strip()
+            if s.startswith("번역:"):
+                translation = s[len("번역:"):].strip()
+            elif s.startswith("유의사항:"):
+                notes = s[len("유의사항:"):].strip()
+        if not translation:
+            translation = response.strip()
+        return translation, notes
 
     # ── 로그 ──
     def save_to_log(self, ko_text: str, response: str):

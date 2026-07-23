@@ -1,16 +1,14 @@
-# Voice Translator
+# Text Translator
 
-한국어 음성/텍스트를 영어와 스페인어로 번역해주는 학습용 데스크톱 앱.
+한국어 텍스트를 영어와 스페인어로 번역해주는 학습용 데스크톱 앱.
 
-- 음성 입력은 **faster-whisper**(로컬)로 인식
 - 번역과 설명은 **Claude (Anthropic API)** 가 생성 — 격식/비격식, España/Latinoamérica 구분, 유의어 nuance 포함
 - 모든 결과는 `logs/YYYY-MM-DD.md` 에 자동 저장
 - 결과창에서 마우스로 선택한 단어/구를 **단어장**(`logs/vocab.md`) 또는 **대화 모음**(`logs/conversation.md`) 에 저장 가능
 
 ## 실행 환경
 
-macOS. Automator 워크플로우로 실행하는 것을 전제로 만들어졌다.
-터미널에서 직접 실행해도 동작하지만 단축키 등 일부 기능은 권한 컨텍스트에 영향을 받음.
+macOS. 마이크·접근성 권한이 필요 없는 텍스트 전용 앱이라 터미널이나 더블클릭 런처로 바로 실행하면 된다.
 
 ## 설치
 
@@ -40,9 +38,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 python3 voice_translate.py
 ```
 
-- 🎤 **녹음 버튼** 클릭 — 다시 누르면 종료
-- 창 포커스 상태에서 **F9** 단축키로도 녹음 토글
-- 하단 입력창에 **한국어 텍스트 + Enter** 로 음성 없이 번역만 사용 가능
+- 입력창은 **여러 줄 입력**(기본 5줄) 가능. 한국어를 적고
+  **🇺🇸 영어 번역** 또는 **🇪🇸 스페인어 번역** 버튼을 누르면 해당 언어로만 번역
 
 ### 결과창에서 사용 가능한 동작
 
@@ -75,6 +72,5 @@ logs/
 
 `voice_translate.py` 상단 상수에서 조정:
 
-- `WHISPER_MODEL_SIZE` — `"tiny"`/`"base"`/`"small"`/`"medium"`/`"large"` (기본 `medium`)
 - `CLAUDE_MODEL` — 번역에 쓰는 Claude 모델 ID
-- `SYSTEM_PROMPT` — 번역 출력 형식/스타일 지시
+- `SYSTEM_PROMPT_EN` / `SYSTEM_PROMPT_ES` — 영어/스페인어 번역 출력 형식·스타일 지시
