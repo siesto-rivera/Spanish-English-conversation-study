@@ -567,38 +567,67 @@ class VoiceTranslator:
         win.bind("<Escape>", lambda _e: win.destroy())
         count_entry.focus_set()
 
-    def _recent_daily_topics(self, limit: int = 12) -> set:
-        """최근 daily 대화 파일들의 섹션 헤더(`주제: …`)에서 사용된 주제를 모은다."""
-        recent: list[str] = []
-        for f in sorted(DAILY_CONV_DIR.glob("*.md"), reverse=True):
+    def _used_daily_topics(self) -> set:
+        """저장된 모든 daily 대화 파일에서 이미 사용한 주제를 전부 모은다(중복 회피용).
+        앱이 쓴 헤더(`## HH:MM — 요청: N문장 / 주제: XXX (임의)`)와
+        LLM 응답 헤더(`## 주제: XXX`) 둘 다에서 주제를 추출한다."""
+        used: set = set()
+        marker = "주제: "
+        for f in DAILY_CONV_DIR.glob("*.md"):
             try:
                 text = f.read_text(encoding="utf-8")
             except OSError:
                 continue
             for line in text.splitlines():
-                marker = "주제: "
                 if line.startswith("## ") and marker in line:
                     t = line.split(marker, 1)[1].strip()
-                    if t.endswith(" (임의)"):  # 자동 선택 꼬리표 제거 → 풀 항목과 정확히 매칭
+                    if t.endswith(" (임의)"):  # 자동 선택 꼬리표 제거
                         t = t[: -len(" (임의)")]
-                    recent.append(t)
-            if len(recent) >= limit:
-                break
-        return set(recent[:limit])
+                    if t:
+                        used.add(t)
+        return used
 
-    def _pick_random_topic(self) -> str:
-        """주제 풀에서 최근에 쓰지 않은 주제를 무작위로 고른다."""
-        recent = self._recent_daily_topics()
-        candidates = [t for t in DAILY_TOPIC_POOL if t not in recent]
-        if not candidates:  # 풀을 한 바퀴 다 돌았으면 전체에서 다시 선택
-            candidates = DAILY_TOPIC_POOL
+    def _pick_random_topic(self, used: set = None) -> str:
+        """주제 풀에서 아직 안 쓴 주제를 무작위로 고른다. 풀이 소진되면 빈 문자열."""
+        if used is None:
+            used = self._used_daily_topics()
+        candidates = [t for t in DAILY_TOPIC_POOL if t not in used]
+        if not candidates:  # 풀을 다 소진 → LLM이 새 주제를 직접 만들도록 위임
+            return ""
         return random.choice(candidates)
 
+    @staticmethod
+    def _extract_topic(response: str) -> str:
+        """대화 응답의 `## 주제: XXX` 줄에서 주제 텍스트를 뽑는다(없으면 빈 문자열)."""
+        marker = "주제: "
+        for line in response.splitlines():
+            if line.startswith("## ") and marker in line:
+                return line.split(marker, 1)[1].strip()
+        return ""
+
     def _do_generate_conversation(self, conv_file: Path, today: str, count: int, topic: str):
-        chosen_topic = topic if topic else self._pick_random_topic()
+        # 저장된 모든 대화의 주제를 확인해 중복을 피한다
+        used = self._used_daily_topics()
+        chosen_topic = topic if topic else self._pick_random_topic(used)
+
+        if chosen_topic:
+            topic_line = f"- 대화 상황/주제: {chosen_topic}\n"
+        else:
+            # 풀 소진: LLM이 기존 주제와 겹치지 않는 새 주제를 직접 고르게 한다
+            topic_line = (
+                "- 대화 상황/주제: 아래 '이미 사용한 주제'와 겹치지 않는, "
+                "새롭고 구체적인 일상 주제를 네가 직접 하나 골라라\n"
+            )
+
+        # 사용자가 직접 주제를 지정하지 않았으면, 이미 쓴 주제 목록을 알려 회피시킨다
+        avoid_line = ""
+        if not topic and used:
+            avoid_line = "- 이미 사용한 주제(반드시 피할 것): " + ", ".join(sorted(used)) + "\n"
+
         user_msg = (
             f"오늘({today})의 대화를 만들어줘.\n"
-            f"- 대화 상황/주제: {chosen_topic}\n"
+            f"{topic_line}"
+            f"{avoid_line}"
             f"- 발화 수: 총 {count}문장 (A와 B의 발화를 합쳐서 정확히 {count}개)\n"
         )
         try:
@@ -616,8 +645,10 @@ class VoiceTranslator:
             # 같은 날에 여러 번 생성 가능: 첫 호출이면 헤더, 이후엔 구분선 + 시간/옵션 헤더로 누적
             timestamp = datetime.now().strftime("%H:%M")
             auto_tag = "" if topic else " (임의)"
+            # 풀 소진 시 LLM이 고른 실제 주제를 응답의 '## 주제:' 줄에서 뽑아 헤더에 반영
+            resolved_topic = chosen_topic or self._extract_topic(response) or "새 주제"
             section_header = (
-                f"## {timestamp} — 요청: {count}문장 / 주제: {chosen_topic}{auto_tag}\n\n"
+                f"## {timestamp} — 요청: {count}문장 / 주제: {resolved_topic}{auto_tag}\n\n"
             )
             if not conv_file.exists():
                 conv_file.write_text(f"# 오늘의 대화 — {today}\n\n", encoding="utf-8")
