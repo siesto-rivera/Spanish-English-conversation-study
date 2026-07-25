@@ -21,27 +21,6 @@ from anthropic import Anthropic
 # ────────── 설정 ──────────
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
-SYSTEM_PROMPT = """너는 한국어 사용자를 위한 영어/스페인어 학습 도우미다.
-사용자가 보낸 한국어 단어 또는 문장을 다음 형식으로 답한다.
-
-🇰🇷 입력: <맞춤법/띄어쓰기 정리한 원문>
-
-🇺🇸 English
-- 가장 자연스러운 표현 (필요 시 격식/비격식 둘 다)
-- 의미 차이가 있는 유의어 1-2개와 nuance 설명
-
-🇪🇸 Español
-- España 표준
-- Latinoamérica 표준 (España와 다를 때만 표기)
-- 격식/비격식 구분이 필요하면 둘 다
-- 발음이 헷갈리는 단어는 [한글 발음] 병기
-
-규칙:
-- 단어 하나 → 동의어 2-3개 + 짧은 예문 1개씩
-- 문장 → 직역과 자연스러운 의역 둘 다
-- 설명은 한국어로 간결하게
-"""
-
 SYSTEM_PROMPT_EN = """너는 한국어 사용자를 위한 영어 학습 도우미다.
 사용자가 보낸 한국어 단어 또는 문장을 영어로 번역한다.
 아래 두 줄 형식을 정확히 지켜 출력하고, 다른 말이나 제목·라벨은 붙이지 마라:
@@ -175,6 +154,7 @@ LOGS_DIR = SCRIPT_DIR / "logs"
 VOCAB_FILE = LOGS_DIR / "vocab.md"
 CONVERSATION_FILE = LOGS_DIR / "conversation.md"
 DAILY_CONV_DIR = LOGS_DIR / "daily_conversations"
+TRANSLATIONS_FILE = LOGS_DIR / "translations.md"  # 번역 결과 문장만 누적 저장
 
 READY_MSG = "아래 입력창에 한국어를 입력하고 번역 버튼을 누르세요"
 # ──────────────────────────
@@ -267,20 +247,16 @@ class VoiceTranslator:
 
         self.entry = tk.Text(input_frame, font=("Helvetica", 13), height=5, wrap=tk.WORD)
         self.entry.pack(fill=tk.X, ipady=2)
+        # Enter=번역 실행, Shift+Enter=줄바꿈
+        self.entry.bind("<Return>", self._on_return)
+        self.entry.bind("<Shift-Return>", lambda e: None)
 
-        # 번역 버튼 두 개: 영어 / 스페인어
-        translate_btns = tk.Frame(input_frame)
-        translate_btns.pack(fill=tk.X, pady=(6, 0))
+        # 번역 버튼 하나: 영어·스페인어 함께
         tk.Button(
-            translate_btns, text="🇺🇸 영어 번역",
+            input_frame, text="번역 (Enter)",
             font=("Helvetica", 13, "bold"),
-            command=lambda: self.submit_text("en"),
-        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 3))
-        tk.Button(
-            translate_btns, text="🇪🇸 스페인어 번역",
-            font=("Helvetica", 13, "bold"),
-            command=lambda: self.submit_text("es"),
-        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(3, 0))
+            command=self.submit_text,
+        ).pack(fill=tk.X, pady=(6, 0))
 
         # 하단 버튼
         btn_frame = tk.Frame(self.root)
@@ -304,6 +280,10 @@ class VoiceTranslator:
         tk.Button(
             btn_frame, text="📖 오늘의 대화 보기",
             command=self.view_conversations,
+        ).pack(side=tk.LEFT, padx=4)
+        tk.Button(
+            btn_frame, text="📄 번역 모음 열기",
+            command=self.open_translations,
         ).pack(side=tk.LEFT, padx=4)
         tk.Button(
             btn_frame, text="🗑️ 화면 비우기",
@@ -372,41 +352,63 @@ class VoiceTranslator:
         return "break"
 
     # ── 텍스트 입력 처리 ──
-    def submit_text(self, lang="both"):
+    def _on_return(self, _event):
+        """Enter → 번역 실행 (줄바꿈 방지). Shift+Enter는 별도 바인딩으로 줄바꿈."""
+        self.submit_text()
+        return "break"
+
+    def submit_text(self):
         text = self.entry.get("1.0", "end-1c").strip()
         if not text:
             return
         self.entry.delete("1.0", tk.END)
-        threading.Thread(target=lambda: self._translate(text, lang), daemon=True).start()
+        threading.Thread(target=lambda: self._translate(text), daemon=True).start()
 
-    # ── 번역 로직 ──
-    # lang: "en"=영어만, "es"=스페인어만, 그 외=둘 다
-    def _translate(self, ko_text: str, lang: str = "both"):
-        system_prompt = {
-            "en": SYSTEM_PROMPT_EN,
-            "es": SYSTEM_PROMPT_ES,
-        }.get(lang, SYSTEM_PROMPT)
-
+    # ── 번역 로직: 영어 결과 → 10줄 아래 → 스페인어 결과(동일 형식) ──
+    def _translate(self, ko_text: str):
         self.append(f"\n▶ 입력: {ko_text}\n")
-        self.set_status("🤖 Claude 호출 중…")
+        self.set_status("🤖 Claude 호출 중… (영어)")
 
         try:
-            msg = self.claude.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=1024,
-                system=system_prompt,
-                messages=[{"role": "user", "content": ko_text}],
-            )
-            response = "".join(b.text for b in msg.content if b.type == "text")
-            translation, notes = self._parse_response(response)
-            # 번역문 → 3줄 아래 구분선 → 표현 시 유의사항
-            block = f"{translation}\n\n\n----------------------------\n{notes}\n"
-            self.append(block)
-            self.save_to_log(ko_text, block)
+            en_tr, en_block = self._translate_one(ko_text, SYSTEM_PROMPT_EN)
+            self.set_status("🤖 Claude 호출 중… (스페인어)")
+            es_tr, es_block = self._translate_one(ko_text, SYSTEM_PROMPT_ES)
         except Exception as e:
             self.append(f"[오류] {e}\n")
+            self.set_status(READY_MSG)
+            return
 
+        # 영어 결과 → 10줄 아래 → 스페인어 결과
+        combined = f"{en_block}{chr(10) * 10}{es_block}\n"
+        self.append(combined)
+        self.save_to_log(ko_text, combined)
+        # 번역 문장만 하나의 파일에 누적 저장
+        self.save_translation_sentences(en_tr, es_tr)
         self.set_status(READY_MSG)
+
+    def _translate_one(self, ko_text: str, system_prompt: str):
+        """한 언어 번역. (번역문, 표시용 블록) 튜플 반환.
+        블록 형식: 번역문 → 3줄 아래 구분선 → 표현 시 유의사항."""
+        msg = self.claude.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": ko_text}],
+        )
+        response = "".join(b.text for b in msg.content if b.type == "text")
+        translation, notes = self._parse_response(response)
+        block = f"{translation}\n\n\n----------------------------\n{notes}\n"
+        return translation, block
+
+    def save_translation_sentences(self, en_tr: str, es_tr: str):
+        """번역 결과 문장만 translations.md 에 누적 저장 (입력·유의사항 제외)."""
+        LOGS_DIR.mkdir(exist_ok=True)
+        # 각 문장 앞에 구분 기호(- )를 붙여 문장을 명확히 구분
+        lines = [f"- {t.strip()}" for t in (en_tr, es_tr) if t and t.strip()]
+        if not lines:
+            return
+        with TRANSLATIONS_FILE.open("a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
 
     @staticmethod
     def _parse_response(response: str):
@@ -476,6 +478,14 @@ class VoiceTranslator:
         if not VOCAB_FILE.exists():
             VOCAB_FILE.write_text("# 단어장\n\n", encoding="utf-8")
         subprocess.run(["open", str(VOCAB_FILE)])
+
+    def open_translations(self):
+        """번역 문장만 누적한 파일을 연다."""
+        LOGS_DIR.mkdir(exist_ok=True)
+        if not TRANSLATIONS_FILE.exists():
+            self.set_status("📄 아직 저장된 번역이 없습니다")
+            return
+        subprocess.run(["open", str(TRANSLATIONS_FILE)])
 
     # ── 대화 저장 ──
     def _add_selection_to_conversation(self, _event=None):
